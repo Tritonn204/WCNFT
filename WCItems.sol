@@ -1421,6 +1421,7 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
     uint256[] public _packs = [1];
 
     mapping(uint256 => uint256) public _equipped;
+    mapping(uint256 => bool) public _isEquipment;
 
     mapping(uint256 => uint256) public _baseDurability;
     mapping(uint256 => uint256) public _currentDurability;
@@ -1450,9 +1451,14 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
 
     function equip(uint256 itemId, uint256 tokenId) public {
         require(balanceOf(msg.sender, itemId) > 0, "insufficient balance");
+        require(_isEquipment[itemId], "this item cannot be equipped");
         burn(msg.sender, itemId, 1);
         _equipped[tokenId] = itemId;
         _currentDurability[tokenId] = _baseDurability[itemId];
+    }
+
+    function setIsEquipment(uint256 itemId, bool isEquipment) public onlyRole(DEV_ROLE) {
+        _isEquipment[itemId] = isEquipment;
     }
 
     function wear(uint256 tokenId) public {
