@@ -748,7 +748,9 @@ contract WCBackpack is ERC1155Holder, AccessControl {
 
             //If stored inventory slot is not empty & the specified replacement is different, return stored item to user
             else if(_userItems[msg.sender][i] != items[i]) {
-                if (_userItems[msg.sender][i] != 0){
+                if (_userItems[msg.sender][i] != 0 
+                    && IERC1155(_itemContract).balanceOf(address(this),items[i]) > 0
+                ){
                     IERC1155(_itemContract).safeTransferFrom(address(this),msg.sender,_userItems[msg.sender][i],1,"0x");
                 }
 
