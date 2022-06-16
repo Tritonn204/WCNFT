@@ -683,12 +683,20 @@ interface IERC1155 is IERC165 {
     ) external;
 }
 
+interface WCDuelServer {
+    function currentDuels(address) external view returns(uint256);
+}
+
 contract WCBackpack is ERC1155Holder, AccessControl {
     bytes32 public constant DEV_ROLE = keccak256("DEV_ROLE");
 
     uint256 public _size = 2;
-    mapping (address => uint256[]) public _userItems;
+    mapping(uint256 => bool) public validItems;
+    mapping(address => uint256[]) public _userItems;
+    mapping(address => bool) public initialized;
+
     address public _itemContract;
+    address public _duelContract;
 
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -714,10 +722,25 @@ contract WCBackpack is ERC1155Holder, AccessControl {
         _revokeRole(DEV_ROLE, dev);
     }
 
+    function setDuelContract(address newContract) public onlyRole(DEV_ROLE) {
+        _duelContract = newContract;
+    }
+
+    function setValidItem(uint256 itemId, bool value) public onlyRole(DEV_ROLE) {
+        validItems[itemId] = value;
+    }
+
     function updateInventory(uint256[] memory items) public {
         require(items.length == _size, "invalid array length (items)");
+        require(WCDuelServer(_duelContract).currentDuels(msg.sender) == 0, "cannot modify battle inventory while in duel");
+
+        if (!initialized[msg.sender]){
+            _userItems[msg.sender] = [0,0];
+            initialized[msg.sender] = true;
+        }
 
         for(uint256 i = 0; i < _size; i++) {
+            require(validItems[items[i]], "invalid item equip request");
             //If stored inventory slot is empty & user specified item to deposit
             if(_userItems[msg.sender][i] == 0 && items[i] != 0) {
                 IERC1155(_itemContract).safeTransferFrom(msg.sender,address(this),items[i],1,"0x");
@@ -725,7 +748,9 @@ contract WCBackpack is ERC1155Holder, AccessControl {
 
             //If stored inventory slot is not empty & the specified replacement is different, return stored item to user
             else if(_userItems[msg.sender][i] != items[i]) {
-                IERC1155(_itemContract).safeTransferFrom(address(this),msg.sender,_userItems[msg.sender][i],1,"0x");
+                if (_userItems[msg.sender][i] != 0){
+                    IERC1155(_itemContract).safeTransferFrom(address(this),msg.sender,_userItems[msg.sender][i],1,"0x");
+                }
 
                 //Only attempt transfer from user if they specified a new item for replacement, not if the replacement is an empty slot
                 if (items[i] != 0) {
@@ -738,10 +763,21 @@ contract WCBackpack is ERC1155Holder, AccessControl {
         _userItems[msg.sender] = items;
     }
 
+    function testInit() public {
+        if (!initialized[msg.sender]){
+            _userItems[msg.sender] = [0,0];
+            initialized[msg.sender] = true;
+        }
+    }
+
     function usePotion(address user, uint256 slot) public onlyRole(DEV_ROLE) {
         require(_userItems[user][slot] != 0, "no potion in inventory at specified slot");
         IERC1155(_itemContract).burn(address(this),_userItems[user][slot],1);
         _userItems[user][slot] = 0;
+    }
+
+    function setItemContract (address itemContract) public onlyRole(DEV_ROLE) {
+        _itemContract = itemContract;
     }
 
     function changeSize(uint256 size) public onlyRole(DEV_ROLE) {
@@ -752,4 +788,3 @@ contract WCBackpack is ERC1155Holder, AccessControl {
         return super.supportsInterface(interfaceId);
     }
 }
-
