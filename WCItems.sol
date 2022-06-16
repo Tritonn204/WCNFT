@@ -1471,7 +1471,7 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
     address public _wcAddress;
     address public _duelContract;
 
-    uint256[] public _prices = [1];
+    mapping(uint256 => uint256) public _prices;
     uint256[] public _packs = [1];
 
     mapping(uint256 => uint256) public _equipped;
@@ -1513,7 +1513,8 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
         require(msg.sender == _duelContract);
         if (_currentDurability[tokenId] > 1) {
             _currentDurability[tokenId] --;
-        } else {
+        } else if (_equipped[tokenId] != 0) {
+            _currentDurability[tokenId] = 0;
             _equipped[tokenId] = 0;
         }
     }
@@ -1538,8 +1539,12 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
         _duelContract = duelContract;
     }
 
-    function setPrices(uint256[] calldata prices) public onlyRole(DEV_ROLE) {
-        _prices = prices;
+    function setPrices(uint256 machineId, uint256 newPrice) public onlyRole(DEV_ROLE) {
+        _prices[machineId] = newPrice;
+    }
+
+    function setPacks(uint256[] calldata packs) public onlyRole(DEV_ROLE) {
+        _packs = packs;
     }
 
     function updateInventory(uint256 machineId, uint256[] calldata itemOptions) public onlyRole(DEV_ROLE) {
@@ -1584,7 +1589,7 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
         
         IERC20 warToken = IERC20(_tokenAddress);
 
-        require(warToken.balanceOf(msg.sender) >= _prices[pack], "insufficient balance");
+        require(warToken.balanceOf(msg.sender) >= _prices[machineId]*_packs[pack], "insufficient balance");
 
         for(uint256 i = 0; i < _packs[pack]; i++) {
             tokenIds[i] = _itemMachines[machineId][randomNumber(i) % _itemMachines[machineId].length];
@@ -1592,7 +1597,7 @@ contract WCItems is ERC1155, AccessControl, ERC1155Burnable, ERC1155Supply {
         }
 
         mintBatch(msg.sender,tokenIds,amounts,data);
-        warToken.burnFrom(msg.sender, _prices[pack]);
+        warToken.burnFrom(msg.sender, _prices[machineId]*_packs[pack]);
     }
 
     function upgradeEquipment(uint256 itemId) public {
