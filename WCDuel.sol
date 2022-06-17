@@ -344,6 +344,8 @@ interface IERC20 {
      */
     function approve(address spender, uint256 amount) external returns (bool);
 
+    function mint(address to, uint256 amount) external;
+
     /**
      * @dev Moves `amount` tokens from `sender` to `recipient` using the
      * allowance mechanism. `amount` is then deducted from the caller's
@@ -926,28 +928,45 @@ interface IERC1155 is IERC165 {
         uint256[] calldata amounts,
         bytes calldata data
     ) external;
+
+
+    function wear(
+        uint256 tokenId
+    ) external;
+}
+
+interface WCBackpack {
+  function usePotion(address user, uint256 slot) external;
 }
 
 contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
     bytes32 public constant DEV_ROLE = keccak256("DEV_ROLE");
-    
-    address public Treasury = 0x3f6B955Bc6C879d00cEa84CFDc59c7091EA90720;
+
+    address public Treasury = 0x39cBFC3377Ba379Bb3681A31A3c94e5B0D6028bA;
 
     address public server = 0xcE824b1dADaa23F76006315e18f596009De1bA63;
 
     address public _itemAddress;
 
-    IERC721 public constant _WC = IERC721(0xC031b7793F17100e9B7Ad369cA05e5ec8A0F5B5C);
-    
+    address public _backpackAddress;
+
+    IERC20 public constant _WARToken = IERC20(0x7434ff4E38D0e7F207BaCC2c6170a32211A13e37);
+
+    IERC721 public constant _WC = IERC721(0x340B62591a489CDe3906690e59a3b4D154024B32);
+
     uint256 public _matchesCount = 0;
     uint256 public currentPlayers = 0;
     bool public serverStatus = false;
     uint256 public serverFee = 100000000000000000;
 
-    uint256 public emissionRate = 3000000000000000000;
+    uint256 public emissionRate = 300000000000000000000;
+    uint256 public winnerEmission = 100000000000000000000;
+    uint256 public loserEmission = 50000000000000000000;
 
     mapping(address => uint256) public currentDuels;
     mapping(uint256 => MatchInfo) public _matchInfo;
+    //day => tokenId => earnings that day
+    mapping(uint256 => mapping (uint256 => uint256)) public dayAllowance;
 
     mapping(address => Record) public walletRecord;
     mapping(uint256 => Record) public cardRecord;
@@ -965,7 +984,6 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
 
     struct QueueStruct {
         uint256[] TokenID;
-        uint256 ItemID;
         address Address;
         uint256 Weapon;
     }
@@ -992,8 +1010,7 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
 
 
     constructor() {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(DEV_ROLE, msg.sender);
+        grantGodMode(msg.sender);
     }
 
     function grantGodMode(address god) internal {
@@ -1019,7 +1036,11 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
         _itemAddress = itemContract;
     }
 
-    function Queue(uint256[] memory tokenID, uint256 weaponChoice, uint256 itemID, uint256 queueType) payable public{
+    function setBackpackAddress(address backpackAddress) public onlyRole(DEV_ROLE) {
+        _backpackAddress = backpackAddress;
+    }
+
+    function Queue(uint256[] memory tokenID, uint256 weaponChoice, uint256 queueType) payable public{
         require(serverStatus == true, "Server is under maintenance");
         require(queueGlossary[queueType].enabled == true, "This queueType is not enabled");
         require(tokenID.length <= 3, "Max of 3 WC allowed");
@@ -1046,14 +1067,10 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
         for (uint i = 0; i < tokenID.length; i++) {
             _WC.safeTransferFrom(msg.sender, address(this), tokenID[i]);
         }
-        if (itemID < 99999) {
-            IERC1155(_itemAddress).safeTransferFrom(msg.sender, address(this), itemID, 1, "0x");
-        }
         currentPlayers++;
 
         if(_queue[queueType][tokenID.length].TokenID[0] == 0){
             _queue[queueType][tokenID.length].TokenID = tokenID;
-            _queue[queueType][tokenID.length].ItemID = itemID;
             _queue[queueType][tokenID.length].Address = msg.sender;
             _queue[queueType][tokenID.length].Weapon = weaponChoice;
             currentDuels[msg.sender] = 1;
@@ -1073,8 +1090,6 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
 
             matchInfo.a = aTokenID;
             matchInfo.b = bTokenID;
-            matchInfo.itemA = _queue[queueType][tokenID.length].ItemID;
-            matchInfo.itemB = itemID;
             matchInfo.addressA = _queue[queueType][tokenID.length].Address;
             matchInfo.addressB = msg.sender;
             matchInfo.matchType = queueType;
@@ -1170,6 +1185,18 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
         serverFee = newServerFee;
     }
 
+    function changeEmissionRate(uint256 newEmissionRate) public onlyRole(DEV_ROLE) {
+        emissionRate = newEmissionRate;
+    }
+
+    function changeWinnerEmission(uint256 newWinnerEmission) public onlyRole(DEV_ROLE) {
+        winnerEmission = newWinnerEmission;
+    }
+
+    function changeLoserEmission(uint256 newLoserEmission) public onlyRole(DEV_ROLE) {
+        loserEmission = newLoserEmission;
+    }
+
     function changeServerStatus() public onlyRole(DEV_ROLE) {
         if(serverStatus == false){
             serverStatus = true;
@@ -1178,69 +1205,135 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
         }
     }
 
-    //A winner == 0 , B winner == 1
-    function endDuel(uint256 matchIndex, uint8 winner, uint256 winnerElo, uint256 loserElo) public onlyRole(DEV_ROLE) {
+    //A winner == 0, B winner == 1
+    function endDuel(uint256 matchIndex, uint8 winner, uint256[] calldata elo, uint256[] calldata usedPots) public onlyRole(DEV_ROLE) {
+        endLogic(matchIndex, winner, elo);
+
+        //Burn Potions that were used
+        if(usedPots[0] < 100){
+            WCBackpack(_backpackAddress).usePotion(_matchInfo[matchIndex].addressA, usedPots[0]);
+        }
+        if(usedPots[1] < 100){
+            WCBackpack(_backpackAddress).usePotion(_matchInfo[matchIndex].addressB, usedPots[1]);
+        }
+
+
+        //Reset Variables
+        currentDuels[_matchInfo[matchIndex].addressA] = 0;
+        currentDuels[_matchInfo[matchIndex].addressB] = 0;
+
+        currentPlayers = currentPlayers -2;
+
+        //Event
+        emit DuelEnded(_matchInfo[matchIndex], walletRecord[_matchInfo[matchIndex].addressA].name, walletRecord[_matchInfo[matchIndex].addressB].name, winner);
+    }
+
+    function endLogic(uint256 matchIndex, uint8 winner, uint256[] calldata elo) internal {
         address ownerA = _matchInfo[matchIndex].addressA;
         address ownerB = _matchInfo[matchIndex].addressB;
 
-        address winnerOwner;
-        address loserOwner;
+        address[] memory Owner = new address[](2);
+
+        uint256[] memory WARAllowance = new uint256[](2);
 
         if(winner == 0){
-            winnerOwner = ownerA;
-            loserOwner = ownerB;
+            Owner[0] = ownerA;
+            Owner[1] = ownerB;
         }else{
-            winnerOwner = ownerB;
-            loserOwner = ownerA;
+            Owner[0] = ownerB;
+            Owner[1] = ownerA;
         }
 
         //Wallet wins/losses
-        walletRecord[winnerOwner].wins++;
-        walletRecord[loserOwner].losses++;
+        walletRecord[Owner[0]].wins++;
+        walletRecord[Owner[1]].losses++;
 
-        walletRecord[winnerOwner].elo = winnerElo;
-        walletRecord[loserOwner].elo = loserElo;
+        walletRecord[Owner[0]].elo = elo[0];
+        walletRecord[Owner[1]].elo = elo[1];
 
-        //Card wins/losses
-        if(winnerOwner == _matchInfo[matchIndex].addressA){
+        //Card wins/losses & WAR Emissions
+        if(Owner[0] == _matchInfo[matchIndex].addressA){
             for (uint256 i = 0; i < _matchInfo[matchIndex].a.length; i++) {
                 cardRecord[_matchInfo[matchIndex].a[i]].wins++;
                 cardRecord[_matchInfo[matchIndex].b[i]].losses++;
+
+                //Winner War Tokens
+                if(dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] <= emissionRate){
+                    if(emissionRate - dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] >= winnerEmission){
+                        WARAllowance[0] += winnerEmission;
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] += winnerEmission;
+                    }else{
+                        WARAllowance[0] += (emissionRate-dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]]);
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] = emissionRate;
+                    }
+                }
+
+                //Loser War Tokens
+                if(dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] < emissionRate){
+                    if(emissionRate - dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] >= loserEmission){
+                        WARAllowance[1] += loserEmission;
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] += loserEmission;
+                    }else{
+                        WARAllowance[1] += (emissionRate-dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]]);
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] = emissionRate;
+                    }
+                }
             }
         }else{
             for (uint256 i = 0; i < _matchInfo[matchIndex].a.length; i++) {
                 cardRecord[_matchInfo[matchIndex].b[i]].wins++;
                 cardRecord[_matchInfo[matchIndex].a[i]].losses++;
+
+                //Winner War Tokens
+                if(dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] <= emissionRate){
+                    if(emissionRate - dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] >= winnerEmission){
+                        WARAllowance[0] += winnerEmission;
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] += winnerEmission;
+                    }else{
+                        WARAllowance[0] += (emissionRate-dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]]);
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].b[i]] = emissionRate;
+                    }
+                }
+
+                //Loser War Tokens
+                if(dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] < emissionRate){
+                    if(emissionRate - dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] >= loserEmission){
+                        WARAllowance[1] += loserEmission;
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] += loserEmission;
+                    }else{
+                        WARAllowance[1] += (emissionRate-dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]]);
+                        dayAllowance[(block.timestamp - 1655424000) / 86400][_matchInfo[matchIndex].a[i]] = emissionRate;
+                    }
+                }
             }
         }
 
-        //Transfer NFTs 
+        //Transfer NFTs back and apply wear to equipment
         for (uint i = 0; i < _matchInfo[matchIndex].a.length; i++) {
             _WC.safeTransferFrom(address(this), ownerA, _matchInfo[matchIndex].a[i]);
             _WC.safeTransferFrom(address(this), ownerB, _matchInfo[matchIndex].b[i]);
+
+            IERC1155(_itemAddress).wear(_matchInfo[matchIndex].a[i]);
+            IERC1155(_itemAddress).wear(_matchInfo[matchIndex].b[i]);
         }
 
         //Send prize
         uint256 prize = ((queueGlossary[_matchInfo[matchIndex].matchType].price)*(_matchInfo[matchIndex].a.length)*2)/10;
         if(queueGlossary[_matchInfo[matchIndex].matchType].currency != address(0)){
-            bool transferCompleteWinner = IERC20(queueGlossary[_matchInfo[matchIndex].matchType].currency).transfer(address(winnerOwner), prize*9);
+            bool transferCompleteWinner = IERC20(queueGlossary[_matchInfo[matchIndex].matchType].currency).transfer(address(Owner[0]), prize*9);
             bool transferCompleteTreasury = IERC20(queueGlossary[_matchInfo[matchIndex].matchType].currency).transfer(address(Treasury), prize);
             if(transferCompleteWinner == false || transferCompleteTreasury == false){
                 revert("Something bad happened with the ERC20");
             }
         }else{
-            payable(winnerOwner).transfer(prize*9);
+            payable(Owner[0]).transfer(prize*9);
             payable(Treasury).transfer(prize);
         }
 
-        //reset variables
-        currentDuels[ownerA] = 0;
-        currentDuels[ownerB] = 0;
-        
-        currentPlayers = currentPlayers -2;
+                //Send WAR Tokens
+        _WARToken.mint(Owner[0], WARAllowance[0]);
+        _WARToken.mint(Owner[1], WARAllowance[1]);
 
-        //Event
-        emit DuelEnded(_matchInfo[matchIndex], walletRecord[ownerA].name, walletRecord[ownerB].name, winner);
     }
 
     //Manual ending of duel
@@ -1248,7 +1341,7 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
         address ownerA = _matchInfo[matchIndex].addressA;
         address ownerB = _matchInfo[matchIndex].addressB;
 
-        //Transfer NFTs 
+        //Transfer NFTs
         for (uint i = 0; i < _matchInfo[matchIndex].a.length; i++) {
             _WC.safeTransferFrom(address(this), ownerA, _matchInfo[matchIndex].a[i]);
             _WC.safeTransferFrom(address(this), ownerB, _matchInfo[matchIndex].b[i]);
@@ -1267,10 +1360,14 @@ contract WCGameServer is ERC721Holder, ERC1155Holder, AccessControl {
             payable(ownerB).transfer(prize*5);
         }
 
+        //Send WAR Tokens
+        _WARToken.mint(ownerA, 100000000000000000000);
+        _WARToken.mint(ownerB, 100000000000000000000);
+
         //reset variables
         currentDuels[ownerA] = 0;
         currentDuels[ownerB] = 0;
-        
+
         currentPlayers = currentPlayers -2;
 
         //Event
