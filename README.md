@@ -1,1 +1,1 @@
-Public archive of the original Fantom Smart Contracts used for the Weaponized Countries GameFi ecosystem
+Public archive of the original Fantom Smart Contracts used for the Weaponized Countries GameFi ecosystem, as ftmscan.io no longer exists
